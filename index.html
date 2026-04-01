@@ -12,71 +12,91 @@
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       overflow: hidden;
       height: 100vh;
+    }
+    canvas { display: block; }
+
+    /* Overlay UI — fades out after interaction */
+    #overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
       display: flex;
       flex-direction: column;
       align-items: center;
       justify-content: center;
+      background: rgba(10, 10, 15, 0.85);
+      transition: opacity 0.6s ease;
     }
-    #info {
-      text-align: center;
-      padding: 1.5rem;
-      max-width: 480px;
+    #overlay.hidden {
+      opacity: 0;
+      pointer-events: none;
     }
-    #info h1 {
-      font-size: 1.4rem;
+    #overlay h1 {
+      font-size: 1.5rem;
       font-weight: 600;
       margin-bottom: 0.5rem;
-      color: #ffffff;
+      color: #fff;
     }
-    #info p {
+    #overlay p {
       font-size: 0.85rem;
-      line-height: 1.5;
+      line-height: 1.6;
       color: #999;
-      margin-bottom: 1rem;
+      max-width: 420px;
+      text-align: center;
+      margin-bottom: 1.2rem;
     }
-    #enter-vr {
+    .btn {
       padding: 14px 36px;
       font-size: 1rem;
       font-weight: 600;
       border: none;
       border-radius: 8px;
-      background: #4a6cf7;
-      color: #fff;
       cursor: pointer;
       transition: background 0.2s;
+      margin: 4px;
     }
-    #enter-vr:hover { background: #3b5de7; }
-    #enter-vr:disabled {
-      background: #333;
-      color: #666;
-      cursor: not-allowed;
+    #start-btn {
+      background: #4a6cf7;
+      color: #fff;
     }
-    #status {
-      margin-top: 0.75rem;
-      font-size: 0.8rem;
-      color: #666;
+    #start-btn:hover { background: #3b5de7; }
+    #enter-vr-btn {
+      background: #2a2a3e;
+      color: #aaa;
+      display: none;
     }
+    #enter-vr-btn:hover { background: #3a3a4e; }
+
+    /* HUD — always visible bottom-left */
     #hud {
       position: fixed;
       bottom: 16px;
       left: 16px;
-      font-size: 0.75rem;
-      color: #555;
-      font-family: monospace;
+      z-index: 5;
+      font-size: 0.8rem;
+      color: rgba(150, 160, 255, 0.7);
+      font-family: 'SF Mono', 'Fira Code', monospace;
       pointer-events: none;
+      text-shadow: 0 0 8px rgba(74, 108, 247, 0.3);
     }
-    canvas { position: fixed; top: 0; left: 0; }
+    #hud .label { color: rgba(150, 160, 255, 0.4); }
   </style>
 </head>
 <body>
 
-<div id="info">
+<!-- Overlay: shown until user starts -->
+<div id="overlay">
   <h1>VR Sound Therapy</h1>
-  <p>Grab the glowing sphere with your controller and move it through space.
-     Height controls frequency, left-right controls stereo panning.</p>
-  <button id="enter-vr" disabled>Checking VR Support…</button>
-  <div id="status"></div>
+  <p>Move the glowing sphere to explore sound.<br>
+     Height = frequency (low ↔ high), Left-Right = stereo panning.<br>
+     Designed for tinnitus relief.</p>
+  <div>
+    <button class="btn" id="start-btn">Start (Desktop)</button>
+    <button class="btn" id="enter-vr-btn">Enter VR</button>
+  </div>
 </div>
+
+<!-- HUD -->
 <div id="hud"></div>
 
 <!-- Three.js r170 via CDN -->
@@ -91,100 +111,92 @@
 
 <script type="module">
 import * as THREE from 'three';
-import { VRButton } from 'three/addons/webxr/VRButton.js';
 
 // ──────────────────────────────────────────────
 // Configuration
 // ──────────────────────────────────────────────
 const CONFIG = {
-  // Audio
-  minFreq: 20,         // Hz — lower bound of audible range
-  maxFreq: 20000,      // Hz — upper bound of audible range
-  smoothingTime: 0.06, // seconds — ramp duration for frequency/pan changes
-  defaultGain: 0.3,    // 0-1 — comfortable default volume
+  minFreq: 20,
+  maxFreq: 20000,
+  smoothingTime: 0.06,
+  defaultGain: 0.35,
 
-  // Spatial mapping
-  minY: 0.0,           // meters — floor level
-  maxY: 2.5,           // meters — ceiling for frequency mapping
-  panRangeX: 2.0,      // meters — ±range for full L/R panning
+  minY: 0.0,
+  maxY: 2.5,
+  panRangeX: 2.0,
 
-  // Interaction
-  grabDistance: 0.15,   // meters — max distance to grab sphere
-
-  // Visual
+  grabDistance: 0.5,       // VR grab distance (meters)
   sphereRadius: 0.08,
   sphereColor: 0x4a6cf7,
   sphereEmissive: 0x4a6cf7,
   sphereEmissiveIntensity: 0.8,
-  gridColor: 0x222233,
-  ambientColor: 0x222244,
 };
 
 // ──────────────────────────────────────────────
 // State
 // ──────────────────────────────────────────────
 let renderer, scene, camera;
-let sphere, sphereGlow;
+let sphere, sphereGlow, sphereLight;
 let audioCtx, oscillator, panner, gainNode;
 let audioStarted = false;
+let desktopDragging = false;
 
-// Per-controller grab state
-const controllers = [];
 const grabState = { controller: null, isGrabbed: false };
-
-const statusEl = document.getElementById('status');
+const overlayEl = document.getElementById('overlay');
 const hudEl = document.getElementById('hud');
-const enterVrBtn = document.getElementById('enter-vr');
+const startBtn = document.getElementById('start-btn');
+const enterVrBtn = document.getElementById('enter-vr-btn');
 
 // ──────────────────────────────────────────────
 // Audio Engine
-// Design Ref: §4.1, §4.2 — Log-scale frequency mapping + smoothing
 // ──────────────────────────────────────────────
 function initAudio() {
   if (audioStarted) return;
-
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
-  // Oscillator → Panner → Gain → Destination
   oscillator = audioCtx.createOscillator();
-  oscillator.type = 'sine'; // Plan SC: Sine wave for tinnitus masking
+  oscillator.type = 'sine';
   oscillator.frequency.setValueAtTime(440, audioCtx.currentTime);
 
   panner = audioCtx.createStereoPanner();
   panner.pan.setValueAtTime(0, audioCtx.currentTime);
 
   gainNode = audioCtx.createGain();
-  gainNode.gain.setValueAtTime(CONFIG.defaultGain, audioCtx.currentTime);
+  gainNode.gain.setValueAtTime(0, audioCtx.currentTime); // Start silent, fade in
 
   oscillator.connect(panner);
   panner.connect(gainNode);
   gainNode.connect(audioCtx.destination);
-
   oscillator.start();
+
+  // Fade in over 300ms to avoid click
+  gainNode.gain.linearRampToValueAtTime(CONFIG.defaultGain, audioCtx.currentTime + 0.3);
   audioStarted = true;
 }
 
-// Plan SC: SC-03 — Log-scale Y→frequency mapping (20Hz–20kHz)
+function resumeAudio() {
+  if (audioCtx && audioCtx.state === 'suspended') {
+    audioCtx.resume();
+  }
+}
+
 function mapYToFrequency(y) {
   const t = Math.max(0, Math.min(1, (y - CONFIG.minY) / (CONFIG.maxY - CONFIG.minY)));
-  // Logarithmic mapping: f = minFreq * (maxFreq/minFreq)^t
   return CONFIG.minFreq * Math.pow(CONFIG.maxFreq / CONFIG.minFreq, t);
 }
 
-// Plan SC: SC-04 — Linear X→stereo panning (-1 to +1)
 function mapXToPan(x) {
   return Math.max(-1, Math.min(1, x / CONFIG.panRangeX));
 }
 
-// Plan SC: SC-05 — Smoothing via linearRampToValueAtTime
 function updateAudio(position) {
   if (!audioCtx || !audioStarted) return;
+  resumeAudio();
 
   const now = audioCtx.currentTime;
   const freq = mapYToFrequency(position.y);
   const pan = mapXToPan(position.x);
 
-  // Cancel scheduled values then ramp to new target
   oscillator.frequency.cancelScheduledValues(now);
   oscillator.frequency.setValueAtTime(oscillator.frequency.value, now);
   oscillator.frequency.linearRampToValueAtTime(freq, now + CONFIG.smoothingTime);
@@ -195,11 +207,9 @@ function updateAudio(position) {
 }
 
 // ──────────────────────────────────────────────
-// Three.js Scene Setup
-// Design Ref: §3 — Architecture overview
+// Three.js Scene
 // ──────────────────────────────────────────────
 function initScene() {
-  // Renderer
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setPixelRatio(window.devicePixelRatio);
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -207,31 +217,37 @@ function initScene() {
   renderer.setClearColor(0x0a0a12);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 1.2;
-  document.body.appendChild(renderer.domElement);
+  document.body.prepend(renderer.domElement);
 
-  // Scene
   scene = new THREE.Scene();
-  scene.fog = new THREE.FogExp2(0x0a0a12, 0.15);
+  scene.fog = new THREE.FogExp2(0x0a0a12, 0.12);
 
-  // Camera (used in non-VR fallback)
   camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
-  camera.position.set(0, 1.6, 2);
+  camera.position.set(0, 1.6, 2.5);
+  camera.lookAt(0, 1.2, 0);
 
-  // Lighting — minimal, dark environment
-  const ambient = new THREE.AmbientLight(CONFIG.ambientColor, 0.5);
-  scene.add(ambient);
+  // Lighting
+  scene.add(new THREE.AmbientLight(0x222244, 0.6));
+  const topLight = new THREE.PointLight(0x4466aa, 1.5, 15);
+  topLight.position.set(0, 3, 0);
+  scene.add(topLight);
 
-  const pointLight = new THREE.PointLight(0x4a6cf7, 2, 10);
-  pointLight.position.set(0, 2, 0);
-  scene.add(pointLight);
+  // Floor grid
+  const grid = new THREE.GridHelper(12, 24, 0x1a1a2e, 0x1a1a2e);
+  grid.material.opacity = 0.4;
+  grid.material.transparent = true;
+  scene.add(grid);
 
-  // Floor grid — subtle reference plane
-  const gridHelper = new THREE.GridHelper(10, 20, CONFIG.gridColor, CONFIG.gridColor);
-  gridHelper.material.opacity = 0.3;
-  gridHelper.material.transparent = true;
-  scene.add(gridHelper);
+  // Y-axis guide pillars (frequency reference)
+  for (let x = -1; x <= 1; x += 2) {
+    const pillarGeom = new THREE.CylinderGeometry(0.003, 0.003, CONFIG.maxY, 8);
+    const pillarMat = new THREE.MeshBasicMaterial({ color: 0x333355, transparent: true, opacity: 0.25 });
+    const pillar = new THREE.Mesh(pillarGeom, pillarMat);
+    pillar.position.set(x * 0.5, CONFIG.maxY / 2, -0.5);
+    scene.add(pillar);
+  }
 
-  // Glowing sphere — the sound source
+  // Sphere (sound source)
   const sphereGeom = new THREE.SphereGeometry(CONFIG.sphereRadius, 32, 32);
   const sphereMat = new THREE.MeshStandardMaterial({
     color: CONFIG.sphereColor,
@@ -241,230 +257,199 @@ function initScene() {
     roughness: 0.2,
   });
   sphere = new THREE.Mesh(sphereGeom, sphereMat);
-  sphere.position.set(0, 1.2, -0.5); // Initial position: eye height, slightly forward
+  sphere.position.set(0, 1.2, -0.5);
   scene.add(sphere);
 
-  // Outer glow effect (larger transparent sphere)
-  const glowGeom = new THREE.SphereGeometry(CONFIG.sphereRadius * 2.5, 32, 32);
+  // Glow shell
+  const glowGeom = new THREE.SphereGeometry(CONFIG.sphereRadius * 3, 32, 32);
   const glowMat = new THREE.MeshBasicMaterial({
     color: CONFIG.sphereColor,
     transparent: true,
-    opacity: 0.08,
+    opacity: 0.06,
     side: THREE.BackSide,
   });
   sphereGlow = new THREE.Mesh(glowGeom, glowMat);
-  sphere.add(sphereGlow); // Parent to sphere so it follows
+  sphere.add(sphereGlow);
 
-  // Frequency guide — vertical line showing Y range
-  const guideGeom = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(0, CONFIG.minY, 0),
-    new THREE.Vector3(0, CONFIG.maxY, 0),
-  ]);
-  const guideMat = new THREE.LineBasicMaterial({ color: 0x333355, transparent: true, opacity: 0.3 });
-  const guideLine = new THREE.Line(guideGeom, guideMat);
-  guideLine.position.set(0, 0, -0.5);
-  scene.add(guideLine);
+  // Point light attached to sphere
+  sphereLight = new THREE.PointLight(0x4a6cf7, 1.5, 3);
+  sphere.add(sphereLight);
 }
 
 // ──────────────────────────────────────────────
-// WebXR Controllers
-// Design Ref: §4.3 — Grab detection via squeeze event
+// WebXR Controllers (VR mode)
 // ──────────────────────────────────────────────
 function initControllers() {
   for (let i = 0; i < 2; i++) {
     const controller = renderer.xr.getController(i);
-    controller.userData.index = i;
     scene.add(controller);
 
-    // Visual indicator — small sphere at controller tip
-    const tipGeom = new THREE.SphereGeometry(0.015, 16, 16);
-    const tipMat = new THREE.MeshBasicMaterial({ color: 0x888899, transparent: true, opacity: 0.6 });
-    const tip = new THREE.Mesh(tipGeom, tipMat);
+    // Controller tip visual
+    const tip = new THREE.Mesh(
+      new THREE.SphereGeometry(0.02, 16, 16),
+      new THREE.MeshBasicMaterial({ color: 0x8888aa, transparent: true, opacity: 0.5 })
+    );
     controller.add(tip);
 
-    // Squeeze events for grab/release
-    controller.addEventListener('squeezestart', onSqueezeStart);
-    controller.addEventListener('squeezeend', onSqueezeEnd);
-
-    // Select as fallback (some controllers may not have squeeze)
-    controller.addEventListener('selectstart', onSqueezeStart);
-    controller.addEventListener('selectend', onSqueezeEnd);
-
-    controllers.push(controller);
+    // Grab via squeeze or select (trigger)
+    controller.addEventListener('squeezestart', onGrab);
+    controller.addEventListener('squeezeend', onRelease);
+    controller.addEventListener('selectstart', onGrab);
+    controller.addEventListener('selectend', onRelease);
   }
 }
 
-function onSqueezeStart(event) {
+function onGrab(event) {
+  if (grabState.isGrabbed) return;
   const controller = event.target;
+  const cPos = new THREE.Vector3();
+  controller.getWorldPosition(cPos);
+  const sPos = new THREE.Vector3();
+  sphere.getWorldPosition(sPos);
 
-  // Check distance to sphere
-  const controllerPos = new THREE.Vector3();
-  controller.getWorldPosition(controllerPos);
-
-  const spherePos = new THREE.Vector3();
-  sphere.getWorldPosition(spherePos);
-
-  const distance = controllerPos.distanceTo(spherePos);
-
-  if (distance < CONFIG.grabDistance && !grabState.isGrabbed) {
+  if (cPos.distanceTo(sPos) < CONFIG.grabDistance) {
     grabState.isGrabbed = true;
     grabState.controller = controller;
-
-    // Visual feedback: brighter sphere
     sphere.material.emissiveIntensity = 1.5;
     sphereGlow.material.opacity = 0.15;
-
-    // Start audio on first grab (user gesture)
+    sphereLight.intensity = 3;
     initAudio();
   }
 }
 
-function onSqueezeEnd(event) {
-  const controller = event.target;
-
-  if (grabState.isGrabbed && grabState.controller === controller) {
+function onRelease(event) {
+  if (grabState.isGrabbed && grabState.controller === event.target) {
     grabState.isGrabbed = false;
     grabState.controller = null;
-
-    // Restore visual state
     sphere.material.emissiveIntensity = CONFIG.sphereEmissiveIntensity;
-    sphereGlow.material.opacity = 0.08;
+    sphereGlow.material.opacity = 0.06;
+    sphereLight.intensity = 1.5;
   }
+}
+
+// ──────────────────────────────────────────────
+// Desktop mouse interaction
+// ──────────────────────────────────────────────
+function initDesktopControls() {
+  // Pointer events on the whole document (overlay is gone by now)
+  document.addEventListener('pointerdown', (e) => {
+    if (e.target.tagName === 'BUTTON') return;
+    desktopDragging = true;
+    moveSphereFromMouse(e);
+  });
+
+  document.addEventListener('pointermove', (e) => {
+    if (!desktopDragging) return;
+    moveSphereFromMouse(e);
+  });
+
+  document.addEventListener('pointerup', () => {
+    desktopDragging = false;
+  });
+}
+
+function moveSphereFromMouse(e) {
+  const x = ((e.clientX / window.innerWidth) * 2 - 1) * CONFIG.panRangeX;
+  const y = (1 - e.clientY / window.innerHeight) * CONFIG.maxY;
+  sphere.position.x = x;
+  sphere.position.y = Math.max(CONFIG.minY, Math.min(CONFIG.maxY, y));
+  // Keep z fixed for desktop
+  sphere.position.z = -0.5;
 }
 
 // ──────────────────────────────────────────────
 // Render Loop
 // ──────────────────────────────────────────────
-function animate() {
-  renderer.setAnimationLoop(render);
-}
-
-function render(time, frame) {
-  // Update sphere position if grabbed
+function render(time) {
+  // VR: follow controller
   if (grabState.isGrabbed && grabState.controller) {
-    const controllerPos = new THREE.Vector3();
-    grabState.controller.getWorldPosition(controllerPos);
-    sphere.position.copy(controllerPos);
+    const pos = new THREE.Vector3();
+    grabState.controller.getWorldPosition(pos);
+    sphere.position.copy(pos);
   }
 
-  // Animate sphere glow pulse (subtle breathing effect)
-  const pulse = 0.06 + Math.sin(time * 0.002) * 0.02;
-  if (!grabState.isGrabbed) {
+  // Glow pulse
+  const pulse = 0.05 + Math.sin(time * 0.002) * 0.02;
+  if (!grabState.isGrabbed && !desktopDragging) {
     sphereGlow.material.opacity = pulse;
   }
 
-  // Update audio based on sphere position
+  // Update audio continuously
   if (audioStarted) {
     updateAudio(sphere.position);
   }
 
-  // HUD for desktop debugging (hidden in VR)
+  // HUD (desktop only)
   if (!renderer.xr.isPresenting) {
     const freq = mapYToFrequency(sphere.position.y);
     const pan = mapXToPan(sphere.position.x);
-    hudEl.textContent = `freq: ${freq.toFixed(1)}Hz | pan: ${pan.toFixed(2)} | y: ${sphere.position.y.toFixed(2)}m`;
+    hudEl.innerHTML =
+      `<span class="label">freq</span> ${freq.toFixed(1)} Hz &nbsp; ` +
+      `<span class="label">pan</span> ${pan.toFixed(2)} &nbsp; ` +
+      `<span class="label">y</span> ${sphere.position.y.toFixed(2)}m`;
   }
 
   renderer.render(scene, camera);
 }
 
 // ──────────────────────────────────────────────
-// VR Session Setup
-// Design Ref: §4.4 — Audio start policy (user gesture)
+// Start / VR Entry
 // ──────────────────────────────────────────────
-async function checkVRSupport() {
-  if (!navigator.xr) {
-    enterVrBtn.textContent = 'WebXR Not Supported';
-    statusEl.textContent = 'This browser does not support WebXR.';
-    return;
-  }
-
-  const supported = await navigator.xr.isSessionSupported('immersive-vr');
-  if (!supported) {
-    enterVrBtn.textContent = 'VR Not Available';
-    statusEl.textContent = 'No VR headset detected. Connect an Oculus Quest or use Oculus Browser.';
-    return;
-  }
-
-  enterVrBtn.disabled = false;
-  enterVrBtn.textContent = 'Enter VR';
-  statusEl.textContent = 'VR headset detected. Put on your headset and click Enter VR.';
+function startDesktop() {
+  overlayEl.classList.add('hidden');
+  initAudio();
+  // Highlight sphere briefly
+  sphere.material.emissiveIntensity = 1.5;
+  sphereLight.intensity = 3;
+  setTimeout(() => {
+    sphere.material.emissiveIntensity = CONFIG.sphereEmissiveIntensity;
+    sphereLight.intensity = 1.5;
+  }, 600);
 }
 
-async function startVRSession() {
-  enterVrBtn.disabled = true;
-  enterVrBtn.textContent = 'Starting VR…';
-
+async function startVR() {
   try {
-    // Plan SC: AudioContext created on user gesture (button click)
     initAudio();
-
     const session = await navigator.xr.requestSession('immersive-vr', {
       optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
     });
-
     renderer.xr.setSession(session);
-
+    overlayEl.classList.add('hidden');
     session.addEventListener('end', () => {
-      enterVrBtn.disabled = false;
-      enterVrBtn.textContent = 'Enter VR';
-      statusEl.textContent = 'VR session ended. Click to re-enter.';
+      overlayEl.classList.remove('hidden');
     });
-
-    statusEl.textContent = 'VR session active. Grab the sphere!';
   } catch (err) {
-    console.error('Failed to start VR session:', err);
-    enterVrBtn.disabled = false;
-    enterVrBtn.textContent = 'Enter VR';
-    statusEl.textContent = `Error: ${err.message}`;
+    console.error('VR session failed:', err);
+    alert('VR을 시작할 수 없습니다: ' + err.message);
+  }
+}
+
+async function checkVR() {
+  if (navigator.xr) {
+    const ok = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
+    if (ok) {
+      enterVrBtn.style.display = 'inline-block';
+    }
   }
 }
 
 // ──────────────────────────────────────────────
-// Non-VR mouse interaction (desktop fallback)
-// ──────────────────────────────────────────────
-function initDesktopFallback() {
-  let isDragging = false;
-
-  renderer.domElement.addEventListener('pointerdown', (e) => {
-    isDragging = true;
-    initAudio();
-  });
-
-  renderer.domElement.addEventListener('pointermove', (e) => {
-    if (!isDragging) return;
-    // Map mouse position to sphere position
-    const x = ((e.clientX / window.innerWidth) * 2 - 1) * CONFIG.panRangeX;
-    const y = (1 - e.clientY / window.innerHeight) * CONFIG.maxY;
-    sphere.position.x = x;
-    sphere.position.y = Math.max(CONFIG.minY, Math.min(CONFIG.maxY, y));
-  });
-
-  renderer.domElement.addEventListener('pointerup', () => {
-    isDragging = false;
-  });
-}
-
-// ──────────────────────────────────────────────
-// Resize handler
-// ──────────────────────────────────────────────
-function onResize() {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-}
-
-// ──────────────────────────────────────────────
-// Initialize
+// Init
 // ──────────────────────────────────────────────
 initScene();
 initControllers();
-initDesktopFallback();
-animate();
+initDesktopControls();
+renderer.setAnimationLoop(render);
 
-window.addEventListener('resize', onResize);
-enterVrBtn.addEventListener('click', startVRSession);
-checkVRSupport();
+window.addEventListener('resize', () => {
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+startBtn.addEventListener('click', startDesktop);
+enterVrBtn.addEventListener('click', startVR);
+checkVR();
 </script>
 </body>
 </html>
