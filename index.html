@@ -243,27 +243,27 @@ function initControllers() {
   }
 }
 
-// ── Joystick Polling ────────────────────────────
-// Try 3 methods to read joystick input:
-//   1. XR session.inputSources[].gamepad
-//   2. navigator.getGamepads()
-//   3. XR controller getWorldPosition delta (fallback)
-// All axes from all gamepads are collected and applied.
+// ── Controller Position Tracking ─────────────────
+// PRIMARY: Track controller position delta while any button is held.
+// Button held + move arm → sphere follows arm movement 1:1
+// Button released → sphere stays in place
+// ALSO tries joystick axes as bonus (if they work)
 
-let debugText; // 3D text in VR to show input debug
+let debugText;
+const prevControllerPos = [new THREE.Vector3(), new THREE.Vector3()];
+const controllerTracking = [false, false]; // is this controller being tracked
 
 function createDebugPanel() {
   const canvas = document.createElement('canvas');
   canvas.width = 512;
-  canvas.height = 256;
+  canvas.height = 320;
   const ctx = canvas.getContext('2d');
   const texture = new THREE.CanvasTexture(canvas);
-  texture.needsUpdate = true;
   const mesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(0.6, 0.3),
-    new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 0.85 })
+    new THREE.PlaneGeometry(0.8, 0.4),
+    new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 0.9 })
   );
-  mesh.position.set(0, 2.2, -1.5);
+  mesh.position.set(0, 2.3, -1.5);
   scene.add(mesh);
   return { canvas, ctx, texture, mesh };
 }
@@ -272,115 +272,111 @@ function updateDebugPanel(lines) {
   if (!debugText) debugText = createDebugPanel();
   const { ctx, canvas, texture } = debugText;
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = 'rgba(10,10,20,0.9)';
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.fillStyle = '#8899ff';
-  ctx.font = '18px monospace';
-  lines.forEach((line, i) => ctx.fillText(line, 10, 24 + i * 22));
+  ctx.fillStyle = 'rgba(10,10,20,0.92)';
+  ctx.roundRect(0, 0, canvas.width, canvas.height, 12);
+  ctx.fill();
+  ctx.fillStyle = '#99aaff';
+  ctx.font = '17px monospace';
+  lines.forEach((line, i) => ctx.fillText(line, 12, 22 + i * 22));
   texture.needsUpdate = true;
 }
 
-function collectAllAxes() {
-  // Returns array of { axes: number[], buttons: GamepadButton[], source: string }
-  const results = [];
+function pollControllers(dt) {
+  let moved = false;
+  const debugLines = [];
 
-  // Method 1: XR inputSources
-  try {
-    const session = renderer.xr.getSession();
-    if (session && session.inputSources) {
-      for (let i = 0; i < session.inputSources.length; i++) {
-        const src = session.inputSources[i];
-        if (src.gamepad && src.gamepad.axes) {
-          results.push({
-            axes: Array.from(src.gamepad.axes),
-            buttons: src.gamepad.buttons ? Array.from(src.gamepad.buttons) : [],
-            hand: src.handedness || (i === 0 ? 'left' : 'right'),
-            source: `xr-${i}(${src.handedness || '?'})`,
-          });
+  // --- Method A: Controller position tracking (guaranteed to work) ---
+  for (let i = 0; i < 2; i++) {
+    const controller = renderer.xr.getController(i);
+    const pos = new THREE.Vector3();
+    controller.getWorldPosition(pos);
+
+    // Check if any button on this controller is pressed
+    let anyPressed = false;
+    let buttonsStr = '';
+    try {
+      const session = renderer.xr.getSession();
+      if (session && session.inputSources[i] && session.inputSources[i].gamepad) {
+        const btns = session.inputSources[i].gamepad.buttons;
+        for (let b = 0; b < btns.length; b++) {
+          if (btns[b].pressed) {
+            anyPressed = true;
+            buttonsStr += b + ',';
+          }
         }
       }
-    }
-  } catch (e) {}
+    } catch (e) {}
 
-  // Method 2: Standard Gamepad API (Quest exposes controllers here too)
-  try {
-    const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
-    for (let i = 0; i < gamepads.length; i++) {
-      const gp = gamepads[i];
-      if (!gp || !gp.axes) continue;
-      // Avoid duplicates if XR already found them (check by id similarity)
-      const isDup = results.some(r => r.axes.length === gp.axes.length &&
-        Math.abs(r.axes[0] - gp.axes[0]) < 0.001);
-      if (!isDup) {
-        results.push({
-          axes: Array.from(gp.axes),
-          buttons: gp.buttons ? Array.from(gp.buttons) : [],
-          hand: gp.id.toLowerCase().includes('left') ? 'left' :
-                gp.id.toLowerCase().includes('right') ? 'right' :
-                (i % 2 === 0 ? 'left' : 'right'),
-          source: `gp-${i}(${gp.id.slice(0,20)})`,
-        });
+    debugLines.push(`ctrl${i}: pos(${pos.x.toFixed(2)},${pos.y.toFixed(2)},${pos.z.toFixed(2)}) btn:[${buttonsStr}]`);
+
+    if (anyPressed) {
+      initAudio();
+      if (controllerTracking[i]) {
+        // Already tracking — apply delta
+        const delta = new THREE.Vector3().subVectors(pos, prevControllerPos[i]);
+        // Only apply if delta is reasonable (< 0.5m per frame = not a teleport)
+        if (delta.length() < 0.5) {
+          sphere.position.add(delta);
+          moved = true;
+        }
       }
-    }
-  } catch (e) {}
-
-  return results;
-}
-
-function pollJoysticks(dt) {
-  const speed = CONFIG.stickSpeed * dt;
-  const dz = CONFIG.stickDeadzone;
-  const all = collectAllAxes();
-
-  let moved = false;
-  let anyButtonPressed = false;
-  const debugLines = [`inputs: ${all.length} | dt: ${(dt*1000).toFixed(0)}ms`];
-
-  for (const input of all) {
-    const { axes, buttons, hand, source } = input;
-
-    // Collect all axis values
-    let lineStr = `${source}: [${axes.map(a => a.toFixed(2)).join(',')}]`;
-    debugLines.push(lineStr);
-
-    // Read every axis — apply all of them
-    // For each pair of axes, apply movement
-    for (let a = 0; a < axes.length; a += 2) {
-      const rawX = axes[a] || 0;
-      const rawY = axes[a + 1] || 0;
-      const ax = Math.abs(rawX) > dz ? rawX : 0;
-      const ay = Math.abs(rawY) > dz ? rawY : 0;
-
-      if (ax === 0 && ay === 0) continue;
-
-      if (hand === 'left') {
-        sphere.position.x += ax * speed;
-        sphere.position.z += ay * speed;
-      } else {
-        sphere.position.x += ax * speed;
-        sphere.position.y -= ay * speed;
-      }
-      moved = true;
-    }
-
-    // Check buttons
-    for (const btn of buttons) {
-      if (btn.pressed) { anyButtonPressed = true; break; }
+      // Start or continue tracking
+      controllerTracking[i] = true;
+      prevControllerPos[i].copy(pos);
+    } else {
+      // Button released — stop tracking, sphere stays
+      controllerTracking[i] = false;
+      prevControllerPos[i].copy(pos);
     }
   }
 
-  if (anyButtonPressed || moved) initAudio();
+  // --- Method B: Joystick axes (bonus, try all) ---
+  try {
+    const session = renderer.xr.getSession();
+    if (session) {
+      for (let i = 0; i < session.inputSources.length; i++) {
+        const src = session.inputSources[i];
+        if (!src.gamepad || !src.gamepad.axes) continue;
+        const axes = src.gamepad.axes;
+        const hand = src.handedness || (i === 0 ? 'left' : 'right');
+        debugLines.push(`joy${i}(${hand}): [${axes.map(a=>a.toFixed(2)).join(',')}]`);
 
-  if (moved) {
-    sphere.position.y = Math.max(CONFIG.minY, sphere.position.y);
+        const dz = CONFIG.stickDeadzone;
+        const speed = CONFIG.stickSpeed * dt;
+
+        // Try ALL axes
+        for (let a = 0; a < axes.length; a += 2) {
+          const ax = Math.abs(axes[a]) > dz ? axes[a] : 0;
+          const ay = (a+1 < axes.length && Math.abs(axes[a+1]) > dz) ? axes[a+1] : 0;
+          if (ax === 0 && ay === 0) continue;
+
+          if (hand === 'left') {
+            sphere.position.x += ax * speed;
+            sphere.position.z += ay * speed;
+          } else {
+            sphere.position.x += ax * speed;
+            sphere.position.y -= ay * speed;
+          }
+          moved = true;
+        }
+      }
+    }
+  } catch (e) {
+    debugLines.push(`joy err: ${e.message}`);
+  }
+
+  // Clamp
+  sphere.position.y = Math.max(CONFIG.minY, sphere.position.y);
+
+  // Visual feedback
+  if (moved || controllerTracking[0] || controllerTracking[1]) {
     sphere.material.emissiveIntensity = 1.3;
     sphereGlow.material.opacity = 0.12;
     sphereLight.intensity = 2.5;
-
     laserLine.visible = true;
-    const controller = renderer.xr.getController(0);
+    const ci = controllerTracking[0] ? 0 : 0;
     const cPos = new THREE.Vector3();
-    controller.getWorldPosition(cPos);
+    renderer.xr.getController(ci).getWorldPosition(cPos);
     const positions = laserLine.geometry.attributes.position;
     positions.setXYZ(0, cPos.x, cPos.y, cPos.z);
     positions.setXYZ(1, sphere.position.x, sphere.position.y, sphere.position.z);
@@ -391,9 +387,9 @@ function pollJoysticks(dt) {
     sphereLight.intensity = 1.5;
   }
 
-  // Show debug in VR so user can see what's happening
-  debugLines.push(`sphere: ${sphere.position.x.toFixed(2)}, ${sphere.position.y.toFixed(2)}, ${sphere.position.z.toFixed(2)}`);
-  debugLines.push(`moved: ${moved} | audio: ${audioStarted}`);
+  // Debug display
+  debugLines.push(`sphere: (${sphere.position.x.toFixed(2)},${sphere.position.y.toFixed(2)},${sphere.position.z.toFixed(2)})`);
+  debugLines.push(`tracking: [${controllerTracking[0]?'ON':'off'},${controllerTracking[1]?'ON':'off'}] moved:${moved}`);
   updateDebugPanel(debugLines);
 }
 
@@ -425,7 +421,7 @@ function render(time) {
 
   // VR: poll buttons every frame
   if (renderer.xr.isPresenting && dt > 0 && dt < 0.5) {
-    pollJoysticks(dt);
+    pollControllers(dt);
   }
 
   // Glow pulse (when idle)
