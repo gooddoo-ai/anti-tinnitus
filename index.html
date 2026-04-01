@@ -146,9 +146,7 @@ let audioStarted = false;
 let desktopDragging = false;
 let lastRenderTime = 0;
 
-// Thumbstick offset — accumulated position beyond arm reach
-const thumbstickOffset = new THREE.Vector3(0, 0, 0);
-const grabState = { controller: null, isGrabbed: false };
+const grabState = { controller: null, isGrabbed: false, grabOffset: new THREE.Vector3() };
 const overlayEl = document.getElementById('overlay');
 const hudEl = document.getElementById('hud');
 const startBtn = document.getElementById('start-btn');
@@ -343,7 +341,8 @@ function onGrab(event) {
   if (cPos.distanceTo(sPos) < CONFIG.grabDistance) {
     grabState.isGrabbed = true;
     grabState.controller = controller;
-    thumbstickOffset.set(0, 0, 0); // reset offset on new grab
+    // Remember offset so sphere doesn't snap to hand center
+    grabState.grabOffset.copy(sPos).sub(cPos);
     sphere.material.emissiveIntensity = 1.5;
     sphereGlow.material.opacity = 0.15;
     sphereLight.intensity = 3;
@@ -395,19 +394,20 @@ function moveSphereFromMouse(e) {
 // Render Loop
 // ──────────────────────────────────────────────
 function render(time) {
-  const dt = (time - lastRenderTime) / 1000; // delta in seconds
+  const dt = (time - lastRenderTime) / 1000;
   lastRenderTime = time;
 
-  // VR: follow controller + thumbstick offset
+  // VR grab: sphere follows controller with offset
   if (grabState.isGrabbed && grabState.controller) {
-    // Read thumbstick from the grabbing controller's gamepad
-    readThumbstick(dt);
-
     const pos = new THREE.Vector3();
     grabState.controller.getWorldPosition(pos);
-    // Add accumulated thumbstick offset to extend beyond arm range
-    pos.add(thumbstickOffset);
+    pos.add(grabState.grabOffset);
     sphere.position.copy(pos);
+  }
+
+  // Thumbstick: ALWAYS moves sphere (grab or not)
+  if (renderer.xr.isPresenting && dt > 0 && dt < 0.5) {
+    applyThumbstick(dt);
   }
 
   // Glow pulse
@@ -435,29 +435,49 @@ function render(time) {
   renderer.render(scene, camera);
 }
 
-// Read thumbstick axes from the XR session's input sources
-function readThumbstick(dt) {
-  if (!renderer.xr.isPresenting || dt <= 0 || dt > 0.5) return;
-
+// Thumbstick moves sphere directly in world space — works with or without grab
+function applyThumbstick(dt) {
   const session = renderer.xr.getSession();
   if (!session) return;
 
   for (const source of session.inputSources) {
     if (!source.gamepad) continue;
     const axes = source.gamepad.axes;
-    // Typical mapping: axes[2] = thumbstick X, axes[3] = thumbstick Y
-    const tx = axes.length > 2 ? axes[2] : 0;
-    const ty = axes.length > 3 ? axes[3] : 0;
+    if (!axes || axes.length < 2) continue;
 
-    // Apply deadzone
+    // Quest Touch: thumbstick can be axes[2,3] or axes[0,1] depending on mapping
+    // Try both pairs — use whichever has larger magnitude
+    let tx = 0, ty = 0;
+    if (axes.length >= 4) {
+      const mag01 = Math.abs(axes[0]) + Math.abs(axes[1]);
+      const mag23 = Math.abs(axes[2]) + Math.abs(axes[3]);
+      if (mag23 >= mag01) {
+        tx = axes[2]; ty = axes[3];
+      } else {
+        tx = axes[0]; ty = axes[1];
+      }
+    } else {
+      tx = axes[0]; ty = axes[1];
+    }
+
+    // Deadzone
     const dz = CONFIG.thumbstickDeadzone;
     const ax = Math.abs(tx) > dz ? tx : 0;
     const ay = Math.abs(ty) > dz ? ty : 0;
 
     if (ax !== 0 || ay !== 0) {
-      // X = left/right, Y (inverted) = up/down
-      thumbstickOffset.x += ax * CONFIG.thumbstickSpeed * dt;
-      thumbstickOffset.y -= ay * CONFIG.thumbstickSpeed * dt; // invert: push up = higher
+      const speed = CONFIG.thumbstickSpeed * dt;
+      sphere.position.x += ax * speed;          // left/right
+      sphere.position.y -= ay * speed;           // up/down (invert: push up = higher)
+
+      // Also update grabOffset so sphere doesn't snap back if grabbed
+      if (grabState.isGrabbed) {
+        grabState.grabOffset.x += ax * speed;
+        grabState.grabOffset.y -= ay * speed;
+      }
+
+      // Start audio on first thumbstick use
+      initAudio();
     }
   }
 }
