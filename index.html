@@ -89,6 +89,7 @@
   <h1>VR Sound Therapy</h1>
   <p>Move the glowing sphere to explore sound.<br>
      Height = frequency (low ↔ high), Left-Right = stereo panning.<br>
+     In VR: grab sphere + use thumbstick to extend range.<br>
      Designed for tinnitus relief.</p>
   <div>
     <button class="btn" id="start-btn">Start (Desktop)</button>
@@ -122,10 +123,13 @@ const CONFIG = {
   defaultGain: 0.35,
 
   minY: 0.0,
-  maxY: 2.5,
-  panRangeX: 2.0,
+  maxY: 3.5,              // extended range for thumbstick
+  panRangeX: 3.0,         // extended range for thumbstick
 
-  grabDistance: 0.5,       // VR grab distance (meters)
+  grabDistance: 0.5,
+  thumbstickSpeed: 2.0,   // meters per second — thumbstick movement speed
+  thumbstickDeadzone: 0.15,
+
   sphereRadius: 0.08,
   sphereColor: 0x4a6cf7,
   sphereEmissive: 0x4a6cf7,
@@ -137,10 +141,13 @@ const CONFIG = {
 // ──────────────────────────────────────────────
 let renderer, scene, camera;
 let sphere, sphereGlow, sphereLight;
-let audioCtx, oscillator, panner, gainNode;
+let audioCtx, oscillator, leftGain, rightGain, masterGain;
 let audioStarted = false;
 let desktopDragging = false;
+let lastRenderTime = 0;
 
+// Thumbstick offset — accumulated position beyond arm reach
+const thumbstickOffset = new THREE.Vector3(0, 0, 0);
 const grabState = { controller: null, isGrabbed: false };
 const overlayEl = document.getElementById('overlay');
 const hudEl = document.getElementById('hud');
@@ -154,23 +161,36 @@ function initAudio() {
   if (audioStarted) return;
   audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
+  // Oscillator (mono sine)
   oscillator = audioCtx.createOscillator();
   oscillator.type = 'sine';
   oscillator.frequency.setValueAtTime(440, audioCtx.currentTime);
 
-  panner = audioCtx.createStereoPanner();
-  panner.pan.setValueAtTime(0, audioCtx.currentTime);
+  // Master gain (overall volume, starts silent for fade-in)
+  masterGain = audioCtx.createGain();
+  masterGain.gain.setValueAtTime(0, audioCtx.currentTime);
 
-  gainNode = audioCtx.createGain();
-  gainNode.gain.setValueAtTime(0, audioCtx.currentTime); // Start silent, fade in
+  // Hard panning: independent L/R gain nodes → channel merger
+  // Oscillator → masterGain → leftGain  → merger[0] (left)
+  //                          → rightGain → merger[1] (right)
+  leftGain = audioCtx.createGain();
+  leftGain.gain.setValueAtTime(1, audioCtx.currentTime);
+  rightGain = audioCtx.createGain();
+  rightGain.gain.setValueAtTime(1, audioCtx.currentTime);
 
-  oscillator.connect(panner);
-  panner.connect(gainNode);
-  gainNode.connect(audioCtx.destination);
+  const merger = audioCtx.createChannelMerger(2);
+
+  oscillator.connect(masterGain);
+  masterGain.connect(leftGain);
+  masterGain.connect(rightGain);
+  leftGain.connect(merger, 0, 0);   // left channel
+  rightGain.connect(merger, 0, 1);  // right channel
+  merger.connect(audioCtx.destination);
+
   oscillator.start();
 
-  // Fade in over 300ms to avoid click
-  gainNode.gain.linearRampToValueAtTime(CONFIG.defaultGain, audioCtx.currentTime + 0.3);
+  // Fade in over 300ms
+  masterGain.gain.linearRampToValueAtTime(CONFIG.defaultGain, audioCtx.currentTime + 0.3);
   audioStarted = true;
 }
 
@@ -185,8 +205,15 @@ function mapYToFrequency(y) {
   return CONFIG.minFreq * Math.pow(CONFIG.maxFreq / CONFIG.minFreq, t);
 }
 
-function mapXToPan(x) {
-  return Math.max(-1, Math.min(1, x / CONFIG.panRangeX));
+// Hard panning: returns { left: 0-1, right: 0-1 }
+// Center = both 1.0, full left = left 1.0 / right 0.0, full right = left 0.0 / right 1.0
+function mapXToLR(x) {
+  const t = Math.max(-1, Math.min(1, x / CONFIG.panRangeX));
+  // t: -1 (full left) to +1 (full right)
+  return {
+    left:  Math.max(0, Math.min(1, 1 - t)),  // 1 at left, 0 at right
+    right: Math.max(0, Math.min(1, 1 + t)),  // 0 at left, 1 at right
+  };
 }
 
 function updateAudio(position) {
@@ -195,15 +222,21 @@ function updateAudio(position) {
 
   const now = audioCtx.currentTime;
   const freq = mapYToFrequency(position.y);
-  const pan = mapXToPan(position.x);
+  const lr = mapXToLR(position.x);
 
+  // Smooth frequency ramp
   oscillator.frequency.cancelScheduledValues(now);
   oscillator.frequency.setValueAtTime(oscillator.frequency.value, now);
   oscillator.frequency.linearRampToValueAtTime(freq, now + CONFIG.smoothingTime);
 
-  panner.pan.cancelScheduledValues(now);
-  panner.pan.setValueAtTime(panner.pan.value, now);
-  panner.pan.linearRampToValueAtTime(pan, now + CONFIG.smoothingTime);
+  // Smooth L/R gain ramp (hard pan — one side goes to 0)
+  leftGain.gain.cancelScheduledValues(now);
+  leftGain.gain.setValueAtTime(leftGain.gain.value, now);
+  leftGain.gain.linearRampToValueAtTime(lr.left, now + CONFIG.smoothingTime);
+
+  rightGain.gain.cancelScheduledValues(now);
+  rightGain.gain.setValueAtTime(rightGain.gain.value, now);
+  rightGain.gain.linearRampToValueAtTime(lr.right, now + CONFIG.smoothingTime);
 }
 
 // ──────────────────────────────────────────────
@@ -310,6 +343,7 @@ function onGrab(event) {
   if (cPos.distanceTo(sPos) < CONFIG.grabDistance) {
     grabState.isGrabbed = true;
     grabState.controller = controller;
+    thumbstickOffset.set(0, 0, 0); // reset offset on new grab
     sphere.material.emissiveIntensity = 1.5;
     sphereGlow.material.opacity = 0.15;
     sphereLight.intensity = 3;
@@ -361,10 +395,18 @@ function moveSphereFromMouse(e) {
 // Render Loop
 // ──────────────────────────────────────────────
 function render(time) {
-  // VR: follow controller
+  const dt = (time - lastRenderTime) / 1000; // delta in seconds
+  lastRenderTime = time;
+
+  // VR: follow controller + thumbstick offset
   if (grabState.isGrabbed && grabState.controller) {
+    // Read thumbstick from the grabbing controller's gamepad
+    readThumbstick(dt);
+
     const pos = new THREE.Vector3();
     grabState.controller.getWorldPosition(pos);
+    // Add accumulated thumbstick offset to extend beyond arm range
+    pos.add(thumbstickOffset);
     sphere.position.copy(pos);
   }
 
@@ -382,14 +424,42 @@ function render(time) {
   // HUD (desktop only)
   if (!renderer.xr.isPresenting) {
     const freq = mapYToFrequency(sphere.position.y);
-    const pan = mapXToPan(sphere.position.x);
+    const lr = mapXToLR(sphere.position.x);
     hudEl.innerHTML =
       `<span class="label">freq</span> ${freq.toFixed(1)} Hz &nbsp; ` +
-      `<span class="label">pan</span> ${pan.toFixed(2)} &nbsp; ` +
+      `<span class="label">L</span> ${(lr.left * 100).toFixed(0)}% &nbsp;` +
+      `<span class="label">R</span> ${(lr.right * 100).toFixed(0)}% &nbsp; ` +
       `<span class="label">y</span> ${sphere.position.y.toFixed(2)}m`;
   }
 
   renderer.render(scene, camera);
+}
+
+// Read thumbstick axes from the XR session's input sources
+function readThumbstick(dt) {
+  if (!renderer.xr.isPresenting || dt <= 0 || dt > 0.5) return;
+
+  const session = renderer.xr.getSession();
+  if (!session) return;
+
+  for (const source of session.inputSources) {
+    if (!source.gamepad) continue;
+    const axes = source.gamepad.axes;
+    // Typical mapping: axes[2] = thumbstick X, axes[3] = thumbstick Y
+    const tx = axes.length > 2 ? axes[2] : 0;
+    const ty = axes.length > 3 ? axes[3] : 0;
+
+    // Apply deadzone
+    const dz = CONFIG.thumbstickDeadzone;
+    const ax = Math.abs(tx) > dz ? tx : 0;
+    const ay = Math.abs(ty) > dz ? ty : 0;
+
+    if (ax !== 0 || ay !== 0) {
+      // X = left/right, Y (inverted) = up/down
+      thumbstickOffset.x += ax * CONFIG.thumbstickSpeed * dt;
+      thumbstickOffset.y -= ay * CONFIG.thumbstickSpeed * dt; // invert: push up = higher
+    }
+  }
 }
 
 // ──────────────────────────────────────────────
