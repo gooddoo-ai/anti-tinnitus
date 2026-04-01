@@ -3,33 +3,30 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>VR Sound Therapy — Tinnitus Relief</title>
+  <title>VR Sound Therapy</title>
   <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { background: #0a0a0f; color: #e0e0e0; font-family: system-ui, sans-serif; overflow: hidden; height: 100vh; }
-    canvas { display: block; }
-    #overlay {
-      position: fixed; inset: 0; z-index: 10;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      background: rgba(10,10,15,0.85); transition: opacity 0.6s;
-    }
-    #overlay.hidden { opacity: 0; pointer-events: none; }
-    #overlay h1 { font-size: 1.5rem; margin-bottom: 0.5rem; color: #fff; }
-    #overlay p { font-size: 0.85rem; line-height: 1.6; color: #999; max-width: 440px; text-align: center; margin-bottom: 1.2rem; }
-    .btn { padding: 14px 36px; font-size: 1rem; font-weight: 600; border: none; border-radius: 8px; cursor: pointer; margin: 4px; }
-    #start-btn { background: #4a6cf7; color: #fff; }
-    #enter-vr-btn { background: #2a2a3e; color: #aaa; display: none; }
-    #hud { position: fixed; bottom: 16px; left: 16px; z-index: 5; font-size: 0.8rem; color: rgba(150,160,255,0.7); font-family: monospace; pointer-events: none; }
-    #hud .label { color: rgba(150,160,255,0.4); }
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{background:#0a0a0f;color:#e0e0e0;font-family:system-ui,sans-serif;overflow:hidden;height:100vh}
+    canvas{display:block}
+    #overlay{position:fixed;inset:0;z-index:10;display:flex;flex-direction:column;align-items:center;justify-content:center;background:rgba(10,10,15,0.85);transition:opacity 0.6s}
+    #overlay.hidden{opacity:0;pointer-events:none}
+    #overlay h1{font-size:1.5rem;margin-bottom:.5rem;color:#fff}
+    #overlay p{font-size:.85rem;line-height:1.6;color:#999;max-width:440px;text-align:center;margin-bottom:1.2rem}
+    .btn{padding:14px 36px;font-size:1rem;font-weight:600;border:none;border-radius:8px;cursor:pointer;margin:4px}
+    #start-btn{background:#4a6cf7;color:#fff}
+    #enter-vr-btn{background:#2a2a3e;color:#aaa;display:none}
+    #hud{position:fixed;bottom:16px;left:16px;z-index:5;font-size:.8rem;color:rgba(150,160,255,.7);font-family:monospace;pointer-events:none}
   </style>
 </head>
 <body>
 <div id="overlay">
   <h1>VR Sound Therapy</h1>
   <p>
-    Height = frequency (5kHz–20kHz), Left-Right = stereo panning.<br><br>
-    <strong>VR:</strong> Point controller at the handle, pull trigger to grab, move arm to control.<br>
-    <strong>Desktop:</strong> Click and drag to move the sphere.
+    VR 공간에 조이스틱이 나타납니다.<br>
+    컨트롤러로 조이스틱 손잡이를 잡고 기울이면<br>
+    사운드 구체가 움직이며 주파수와 패닝이 변합니다.<br><br>
+    <strong>위/아래</strong> = 주파수 (5kHz–20kHz)<br>
+    <strong>좌/우</strong> = 스테레오 패닝
   </p>
   <div>
     <button class="btn" id="start-btn">Start (Desktop)</button>
@@ -39,37 +36,36 @@
 <div id="hud"></div>
 
 <script type="importmap">
-{ "imports": {
-    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
-} }
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}
 </script>
 <script type="module">
 import * as THREE from 'three';
 
 // ── Config ─────────────────────────────────
-const CONFIG = {
-  minFreq: 5000, maxFreq: 20000, smoothingTime: 0.06, defaultGain: 0.35,
-  minY: 0.0, maxY: 4.0, panRangeX: 3.0,
-  sphereRadius: 0.08,
-  handleRadius: 0.06,      // grab handle size
-  handleColor: 0xff6644,
-  sphereColor: 0x4a6cf7,
+const CONF = {
+  minFreq: 5000, maxFreq: 20000, smooth: 0.06, gain: 0.35,
+  minY: 0, maxY: 4, panX: 3,
+  // Joystick
+  joyBaseY: 0.85,         // base height (waist level)
+  joyBaseZ: -0.45,        // in front of user
+  stickLen: 0.3,          // stick length
+  stickMaxTilt: 0.7,      // max tilt in radians (~40°)
+  knobRadius: 0.05,       // grab knob size
+  sphereMoveSpeed: 2.0,   // how fast sphere moves per second at full tilt
 };
 
 // ── State ──────────────────────────────────
 let renderer, scene, camera;
 let soundSphere, sphereGlow, sphereLight;
-let handle, handleGlow; // grabbable handle in VR
-let rayLine;            // controller ray visualization
-let audioCtx, oscillator, leftGain, rightGain, masterGain;
-let audioStarted = false;
-let desktopDragging = false;
+let joyBase, joyStick, joyKnob, joyKnobGlow;
+let audioCtx, oscillator, leftGain, rightGain, masterGain, audioStarted = false;
+let desktopDragging = false, lastTime = 0;
 
-// VR grab state
-const grab = { active: false, controllerIndex: -1 };
+// Joystick grab
+const joyGrab = { active: false, ctrlIdx: -1 };
+const joyTilt = { x: 0, y: 0 }; // current tilt (-1 to 1)
 const raycaster = new THREE.Raycaster();
-const tempMatrix = new THREE.Matrix4();
+const _mat4 = new THREE.Matrix4();
 
 // ── Audio ──────────────────────────────────
 function initAudio() {
@@ -84,41 +80,34 @@ function initAudio() {
   rightGain = audioCtx.createGain();
   const merger = audioCtx.createChannelMerger(2);
   oscillator.connect(masterGain);
-  masterGain.connect(leftGain);
-  masterGain.connect(rightGain);
-  leftGain.connect(merger, 0, 0);
-  rightGain.connect(merger, 0, 1);
+  masterGain.connect(leftGain); masterGain.connect(rightGain);
+  leftGain.connect(merger, 0, 0); rightGain.connect(merger, 0, 1);
   merger.connect(audioCtx.destination);
   oscillator.start();
-  masterGain.gain.linearRampToValueAtTime(CONFIG.defaultGain, audioCtx.currentTime + 0.3);
+  masterGain.gain.linearRampToValueAtTime(CONF.gain, audioCtx.currentTime + 0.3);
   audioStarted = true;
 }
-
 function resumeAudio() { if (audioCtx?.state === 'suspended') audioCtx.resume(); }
-
-function mapYToFreq(y) {
-  const t = Math.max(0, Math.min(1, (y - CONFIG.minY) / (CONFIG.maxY - CONFIG.minY)));
-  return CONFIG.minFreq * Math.pow(CONFIG.maxFreq / CONFIG.minFreq, t);
+function mapFreq(y) {
+  const t = Math.max(0, Math.min(1, (y - CONF.minY) / (CONF.maxY - CONF.minY)));
+  return CONF.minFreq * Math.pow(CONF.maxFreq / CONF.minFreq, t);
 }
-function mapXToLR(x) {
-  const t = Math.max(-1, Math.min(1, x / CONFIG.panRangeX));
-  return { left: Math.max(0, 1 - t), right: Math.max(0, 1 + t) };
+function mapLR(x) {
+  const t = Math.max(-1, Math.min(1, x / CONF.panX));
+  return { l: Math.max(0, 1 - t), r: Math.max(0, 1 + t) };
 }
-function updateAudio(pos) {
-  if (!audioCtx || !audioStarted) return;
-  resumeAudio();
-  const now = audioCtx.currentTime;
-  const freq = mapYToFreq(pos.y);
-  const lr = mapXToLR(pos.x);
+function updateAudio(p) {
+  if (!audioStarted) return; resumeAudio();
+  const now = audioCtx.currentTime, f = mapFreq(p.y), lr = mapLR(p.x);
   oscillator.frequency.cancelScheduledValues(now);
   oscillator.frequency.setValueAtTime(oscillator.frequency.value, now);
-  oscillator.frequency.linearRampToValueAtTime(freq, now + CONFIG.smoothingTime);
+  oscillator.frequency.linearRampToValueAtTime(f, now + CONF.smooth);
   leftGain.gain.cancelScheduledValues(now);
   leftGain.gain.setValueAtTime(leftGain.gain.value, now);
-  leftGain.gain.linearRampToValueAtTime(lr.left, now + CONFIG.smoothingTime);
+  leftGain.gain.linearRampToValueAtTime(lr.l, now + CONF.smooth);
   rightGain.gain.cancelScheduledValues(now);
   rightGain.gain.setValueAtTime(rightGain.gain.value, now);
-  rightGain.gain.linearRampToValueAtTime(lr.right, now + CONFIG.smoothingTime);
+  rightGain.gain.linearRampToValueAtTime(lr.r, now + CONF.smooth);
 }
 
 // ── Scene ──────────────────────────────────
@@ -129,251 +118,274 @@ function initScene() {
   renderer.xr.enabled = true;
   renderer.setClearColor(0x0a0a12);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
-  renderer.toneMappingExposure = 1.2;
   document.body.prepend(renderer.domElement);
 
   scene = new THREE.Scene();
   scene.fog = new THREE.FogExp2(0x0a0a12, 0.08);
-  camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 50);
+  camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.01, 50);
   camera.position.set(0, 1.6, 2.5);
   camera.lookAt(0, 1.2, 0);
 
   scene.add(new THREE.AmbientLight(0x222244, 0.6));
-  const topLight = new THREE.PointLight(0x4466aa, 1.5, 15);
-  topLight.position.set(0, 3, 0);
-  scene.add(topLight);
+  const pl = new THREE.PointLight(0x4466aa, 1.5, 15);
+  pl.position.set(0, 3, 0); scene.add(pl);
 
-  // Floor grid
   const grid = new THREE.GridHelper(12, 24, 0x1a1a2e, 0x1a1a2e);
-  grid.material.opacity = 0.4; grid.material.transparent = true;
-  scene.add(grid);
+  grid.material.opacity = 0.4; grid.material.transparent = true; scene.add(grid);
 
-  // ── Sound sphere (the audio source, follows the handle) ──
+  // ── Sound sphere ──
   soundSphere = new THREE.Mesh(
-    new THREE.SphereGeometry(CONFIG.sphereRadius, 32, 32),
-    new THREE.MeshStandardMaterial({
-      color: CONFIG.sphereColor, emissive: CONFIG.sphereColor,
-      emissiveIntensity: 0.8, metalness: 0.3, roughness: 0.2,
-    })
+    new THREE.SphereGeometry(0.08, 32, 32),
+    new THREE.MeshStandardMaterial({ color: 0x4a6cf7, emissive: 0x4a6cf7, emissiveIntensity: 0.8, metalness: 0.3, roughness: 0.2 })
   );
-  soundSphere.position.set(0, 1.2, -0.8);
+  soundSphere.position.set(0, 1.5, -1.2);
   scene.add(soundSphere);
-
   sphereGlow = new THREE.Mesh(
-    new THREE.SphereGeometry(CONFIG.sphereRadius * 3, 32, 32),
-    new THREE.MeshBasicMaterial({ color: CONFIG.sphereColor, transparent: true, opacity: 0.06, side: THREE.BackSide })
+    new THREE.SphereGeometry(0.24, 32, 32),
+    new THREE.MeshBasicMaterial({ color: 0x4a6cf7, transparent: true, opacity: 0.06, side: THREE.BackSide })
   );
   soundSphere.add(sphereGlow);
   sphereLight = new THREE.PointLight(0x4a6cf7, 1.5, 3);
   soundSphere.add(sphereLight);
 
-  // ── Grabbable handle (VR joystick knob) ──
-  // This is a bright orange sphere near the user, easy to point at and grab
-  handle = new THREE.Mesh(
-    new THREE.SphereGeometry(CONFIG.handleRadius, 24, 24),
-    new THREE.MeshStandardMaterial({
-      color: CONFIG.handleColor, emissive: CONFIG.handleColor,
-      emissiveIntensity: 0.6, metalness: 0.2, roughness: 0.3,
-    })
-  );
-  // Position: right in front of user at waist height, easy to reach
-  handle.position.copy(soundSphere.position);
-  scene.add(handle);
-
-  handleGlow = new THREE.Mesh(
-    new THREE.SphereGeometry(CONFIG.handleRadius * 2.5, 24, 24),
-    new THREE.MeshBasicMaterial({ color: CONFIG.handleColor, transparent: true, opacity: 0.08, side: THREE.BackSide })
-  );
-  handle.add(handleGlow);
-
-  // Small connecting line between handle and sphere
-  // (they start at same position, but handle can be grabbed and moved)
-
-  // ── Controller ray line ──
-  const rayGeom = new THREE.BufferGeometry().setFromPoints([
-    new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -5)
-  ]);
-  rayLine = new THREE.Line(rayGeom, new THREE.LineBasicMaterial({
-    color: 0xff6644, transparent: true, opacity: 0.0
-  }));
-  scene.add(rayLine);
+  // ── Virtual Joystick ──
+  buildJoystick();
 }
 
-// ── VR Controllers + Ray Grab ──────────────
+function buildJoystick() {
+  // Base plate (disc)
+  const baseGeom = new THREE.CylinderGeometry(0.12, 0.12, 0.02, 32);
+  const baseMat = new THREE.MeshStandardMaterial({ color: 0x333344, metalness: 0.5, roughness: 0.3 });
+  joyBase = new THREE.Mesh(baseGeom, baseMat);
+  joyBase.position.set(0, CONF.joyBaseY, CONF.joyBaseZ);
+  scene.add(joyBase);
+
+  // Base ring (visual accent)
+  const ringGeom = new THREE.TorusGeometry(0.12, 0.008, 8, 32);
+  const ringMat = new THREE.MeshBasicMaterial({ color: 0x4a6cf7, transparent: true, opacity: 0.4 });
+  const ring = new THREE.Mesh(ringGeom, ringMat);
+  ring.rotation.x = Math.PI / 2;
+  ring.position.y = 0.01;
+  joyBase.add(ring);
+
+  // Stick (cylinder from base upward)
+  const stickGeom = new THREE.CylinderGeometry(0.012, 0.015, CONF.stickLen, 8);
+  const stickMat = new THREE.MeshStandardMaterial({ color: 0x555566, metalness: 0.6, roughness: 0.2 });
+  joyStick = new THREE.Mesh(stickGeom, stickMat);
+  // Pivot from bottom of stick
+  joyStick.geometry.translate(0, CONF.stickLen / 2, 0);
+  joyStick.position.set(0, 0.01, 0);
+  joyBase.add(joyStick);
+
+  // Knob (grab target at top of stick)
+  const knobGeom = new THREE.SphereGeometry(CONF.knobRadius, 24, 24);
+  const knobMat = new THREE.MeshStandardMaterial({ color: 0xff6644, emissive: 0xff6644, emissiveIntensity: 0.5, metalness: 0.2, roughness: 0.3 });
+  joyKnob = new THREE.Mesh(knobGeom, knobMat);
+  joyKnob.position.set(0, CONF.stickLen, 0);
+  joyStick.add(joyKnob);
+
+  // Knob glow
+  joyKnobGlow = new THREE.Mesh(
+    new THREE.SphereGeometry(CONF.knobRadius * 2.5, 24, 24),
+    new THREE.MeshBasicMaterial({ color: 0xff6644, transparent: true, opacity: 0.1, side: THREE.BackSide })
+  );
+  joyKnob.add(joyKnobGlow);
+
+  // Direction labels (tiny floating text indicators)
+  addLabel('▲ HIGH', 0, CONF.stickLen + 0.12, -0.05, joyBase);
+  addLabel('▼ LOW', 0, -0.05, -0.05, joyBase);
+  addLabel('◀ L', -0.18, CONF.stickLen * 0.5, 0, joyBase);
+  addLabel('▶ R', 0.18, CONF.stickLen * 0.5, 0, joyBase);
+}
+
+function addLabel(text, x, y, z, parent) {
+  const canvas = document.createElement('canvas');
+  canvas.width = 128; canvas.height = 32;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#6677aa';
+  ctx.font = '18px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, 64, 22);
+  const tex = new THREE.CanvasTexture(canvas);
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(0.12, 0.03),
+    new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide })
+  );
+  mesh.position.set(x, y, z);
+  parent.add(mesh);
+}
+
+// ── Controllers ────────────────────────────
 function initControllers() {
   for (let i = 0; i < 2; i++) {
-    const controller = renderer.xr.getController(i);
-    scene.add(controller);
+    const c = renderer.xr.getController(i);
+    scene.add(c);
+    // Ray line
+    const lineGeom = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0, 0), new THREE.Vector3(0, 0, -3)
+    ]);
+    const line = new THREE.Line(lineGeom, new THREE.LineBasicMaterial({
+      color: 0x6666aa, transparent: true, opacity: 0.3
+    }));
+    c.add(line);
+    c.userData.ray = line;
 
-    // Trigger = selectstart/selectend (this definitely works on Quest)
-    controller.addEventListener('selectstart', () => onSelectStart(i));
-    controller.addEventListener('selectend', () => onSelectEnd(i));
-    // Also try squeeze
-    controller.addEventListener('squeezestart', () => onSelectStart(i));
-    controller.addEventListener('squeezeend', () => onSelectEnd(i));
+    c.addEventListener('selectstart', () => tryGrab(i));
+    c.addEventListener('selectend', () => releaseGrab(i));
+    c.addEventListener('squeezestart', () => tryGrab(i));
+    c.addEventListener('squeezeend', () => releaseGrab(i));
   }
 }
 
-function onSelectStart(index) {
+function tryGrab(idx) {
   initAudio();
-  // Check if controller ray hits the handle
-  const controller = renderer.xr.getController(index);
-  tempMatrix.identity().extractRotation(controller.matrixWorld);
-  raycaster.ray.origin.setFromMatrixPosition(controller.matrixWorld);
-  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(tempMatrix);
+  if (joyGrab.active) return;
 
-  const hits = raycaster.intersectObject(handle, false);
-  if (hits.length > 0) {
-    grab.active = true;
-    grab.controllerIndex = index;
-    handle.material.emissiveIntensity = 1.2;
-    handleGlow.material.opacity = 0.2;
+  const c = renderer.xr.getController(idx);
+  _mat4.identity().extractRotation(c.matrixWorld);
+  raycaster.ray.origin.setFromMatrixPosition(c.matrixWorld);
+  raycaster.ray.direction.set(0, 0, -1).applyMatrix4(_mat4);
+
+  // Check hit on knob (use a larger invisible sphere for easier grab)
+  const knobWorldPos = new THREE.Vector3();
+  joyKnob.getWorldPosition(knobWorldPos);
+  const dist = raycaster.ray.distanceToPoint(knobWorldPos);
+
+  if (dist < 0.15) { // generous grab distance
+    joyGrab.active = true;
+    joyGrab.ctrlIdx = idx;
+    joyKnob.material.emissiveIntensity = 1.2;
+    joyKnobGlow.material.opacity = 0.25;
+    c.userData.ray.material.color.set(0xff6644);
+    c.userData.ray.material.opacity = 0.6;
   }
 }
 
-function onSelectEnd(index) {
-  if (grab.active && grab.controllerIndex === index) {
-    grab.active = false;
-    grab.controllerIndex = -1;
-    handle.material.emissiveIntensity = 0.6;
-    handleGlow.material.opacity = 0.08;
+function releaseGrab(idx) {
+  if (joyGrab.active && joyGrab.ctrlIdx === idx) {
+    joyGrab.active = false;
+    joyGrab.ctrlIdx = -1;
+    // Spring back to center
+    joyTilt.x = 0; joyTilt.y = 0;
+    joyStick.rotation.x = 0;
+    joyStick.rotation.z = 0;
+    joyKnob.material.emissiveIntensity = 0.5;
+    joyKnobGlow.material.opacity = 0.1;
+    const c = renderer.xr.getController(idx);
+    c.userData.ray.material.color.set(0x6666aa);
+    c.userData.ray.material.opacity = 0.3;
   }
+}
+
+// ── VR Update ──────────────────────────────
+function updateVR(dt) {
+  if (!joyGrab.active) return;
+
+  const c = renderer.xr.getController(joyGrab.ctrlIdx);
+  const ctrlPos = new THREE.Vector3();
+  c.getWorldPosition(ctrlPos);
+
+  // Get joystick base world position
+  const basePos = new THREE.Vector3();
+  joyBase.getWorldPosition(basePos);
+  basePos.y += 0.01; // pivot point
+
+  // Vector from base to controller
+  const diff = new THREE.Vector3().subVectors(ctrlPos, basePos);
+
+  // Calculate tilt angles (clamp to max)
+  const tiltX = Math.max(-CONF.stickMaxTilt, Math.min(CONF.stickMaxTilt,
+    Math.atan2(diff.x, CONF.stickLen)));
+  const tiltZ = Math.max(-CONF.stickMaxTilt, Math.min(CONF.stickMaxTilt,
+    Math.atan2(-diff.z, CONF.stickLen)));
+  const tiltY = Math.max(-CONF.stickMaxTilt, Math.min(CONF.stickMaxTilt,
+    Math.atan2(-diff.y + CONF.stickLen, CONF.stickLen) ));
+
+  // Apply stick rotation (tilt forward/back = X rotation, left/right = Z rotation)
+  joyStick.rotation.z = -tiltX;
+  joyStick.rotation.x = tiltZ;
+
+  // Normalize tilt to -1..1
+  joyTilt.x = tiltX / CONF.stickMaxTilt;
+  joyTilt.y = tiltZ / CONF.stickMaxTilt;
+
+  // Use vertical component: controller higher than base = positive
+  const vertTilt = Math.max(-1, Math.min(1, (diff.y - CONF.stickLen * 0.5) / (CONF.stickLen * 0.8)));
+
+  // Move sound sphere based on tilt
+  const speed = CONF.sphereMoveSpeed * dt;
+  soundSphere.position.x += joyTilt.x * speed;
+  soundSphere.position.y += vertTilt * speed;
+  soundSphere.position.y = Math.max(CONF.minY, soundSphere.position.y);
+
+  // Visual: brighter sphere when moving
+  soundSphere.material.emissiveIntensity = 0.8 + Math.abs(joyTilt.x) * 0.5 + Math.abs(vertTilt) * 0.5;
+  sphereLight.intensity = 1.5 + Math.abs(joyTilt.x) + Math.abs(vertTilt);
+}
+
+// ── Desktop ────────────────────────────────
+function initDesktop() {
+  document.addEventListener('pointerdown', e => { if (e.target.tagName !== 'BUTTON') { desktopDragging = true; moveFromMouse(e); } });
+  document.addEventListener('pointermove', e => { if (desktopDragging) moveFromMouse(e); });
+  document.addEventListener('pointerup', () => { desktopDragging = false; });
+}
+function moveFromMouse(e) {
+  soundSphere.position.x = ((e.clientX / innerWidth) * 2 - 1) * CONF.panX;
+  soundSphere.position.y = Math.max(CONF.minY, Math.min(CONF.maxY, (1 - e.clientY / innerHeight) * CONF.maxY));
 }
 
 // ── Render ─────────────────────────────────
 function render(time) {
-  // VR: update ray and handle position
-  if (renderer.xr.isPresenting) {
-    updateVR();
-  }
+  const dt = Math.min((time - lastTime) / 1000, 0.1);
+  lastTime = time;
 
-  // Glow pulse
-  if (!grab.active && !desktopDragging) {
-    const p = 0.05 + Math.sin(time * 0.002) * 0.02;
-    sphereGlow.material.opacity = p;
-    handleGlow.material.opacity = 0.06 + Math.sin(time * 0.003) * 0.02;
+  if (renderer.xr.isPresenting) updateVR(dt);
+
+  // Idle glow pulse
+  if (!joyGrab.active && !desktopDragging) {
+    sphereGlow.material.opacity = 0.05 + Math.sin(time * 0.002) * 0.02;
+    joyKnobGlow.material.opacity = 0.08 + Math.sin(time * 0.003) * 0.03;
   }
 
   if (audioStarted) updateAudio(soundSphere.position);
 
-  // Desktop HUD
   if (!renderer.xr.isPresenting) {
-    const freq = mapYToFreq(soundSphere.position.y);
-    const lr = mapXToLR(soundSphere.position.x);
+    const f = mapFreq(soundSphere.position.y), lr = mapLR(soundSphere.position.x);
     document.getElementById('hud').innerHTML =
-      `<span class="label">freq</span> ${freq.toFixed(0)} Hz &nbsp; ` +
-      `<span class="label">L</span> ${(lr.left * 100).toFixed(0)}% &nbsp;` +
-      `<span class="label">R</span> ${(lr.right * 100).toFixed(0)}%`;
+      `freq ${f.toFixed(0)}Hz &nbsp; L${(lr.l*100).toFixed(0)}% R${(lr.r*100).toFixed(0)}%`;
   }
-
   renderer.render(scene, camera);
 }
 
-function updateVR() {
-  // Show ray from each controller
-  for (let i = 0; i < 2; i++) {
-    const controller = renderer.xr.getController(i);
-
-    if (i === 0 || grab.controllerIndex === i) {
-      // Update ray visualization for primary controller or grabbing controller
-      tempMatrix.identity().extractRotation(controller.matrixWorld);
-      const origin = new THREE.Vector3().setFromMatrixPosition(controller.matrixWorld);
-      const dir = new THREE.Vector3(0, 0, -1).applyMatrix4(tempMatrix);
-
-      // Show ray
-      const end = origin.clone().addScaledVector(dir, 5);
-      rayLine.geometry.setFromPoints([origin, end]);
-      rayLine.geometry.attributes.position.needsUpdate = true;
-
-      // Check if ray hits handle (for visual hover feedback)
-      raycaster.ray.origin.copy(origin);
-      raycaster.ray.direction.copy(dir);
-      const hits = raycaster.intersectObject(handle, false);
-
-      if (hits.length > 0 || (grab.active && grab.controllerIndex === i)) {
-        rayLine.material.opacity = 0.5;
-        rayLine.material.color.set(0xff6644);
-      } else {
-        rayLine.material.opacity = 0.15;
-        rayLine.material.color.set(0x6666aa);
-      }
-
-      // If grabbing, move handle to where ray hits a virtual plane
-      if (grab.active && grab.controllerIndex === i) {
-        // Project ray onto a plane at the handle's Z depth
-        // This lets the user move the handle in X/Y by moving the controller
-        const planeZ = handle.position.z;
-        if (Math.abs(dir.z) > 0.001) {
-          const t = (planeZ - origin.z) / dir.z;
-          if (t > 0 && t < 20) {
-            const hitPoint = origin.clone().addScaledVector(dir, t);
-            handle.position.x = hitPoint.x;
-            handle.position.y = Math.max(CONFIG.minY, hitPoint.y);
-          }
-        }
-
-        // Sound sphere follows handle
-        soundSphere.position.copy(handle.position);
-      }
-    }
-  }
-}
-
-// ── Desktop ────────────────────────────────
-function initDesktopControls() {
-  document.addEventListener('pointerdown', (e) => {
-    if (e.target.tagName === 'BUTTON') return;
-    desktopDragging = true;
-    moveSphereFromMouse(e);
-  });
-  document.addEventListener('pointermove', (e) => { if (desktopDragging) moveSphereFromMouse(e); });
-  document.addEventListener('pointerup', () => { desktopDragging = false; });
-}
-function moveSphereFromMouse(e) {
-  const x = ((e.clientX / window.innerWidth) * 2 - 1) * CONFIG.panRangeX;
-  const y = Math.max(CONFIG.minY, Math.min(CONFIG.maxY, (1 - e.clientY / window.innerHeight) * CONFIG.maxY));
-  soundSphere.position.set(x, y, soundSphere.position.z);
-  handle.position.copy(soundSphere.position);
-}
-
-// ── Start / VR ─────────────────────────────
-function startDesktop() {
-  document.getElementById('overlay').classList.add('hidden');
-  initAudio();
-}
-async function startVR() {
+// ── Start ──────────────────────────────────
+document.getElementById('start-btn').addEventListener('click', () => {
+  document.getElementById('overlay').classList.add('hidden'); initAudio();
+});
+document.getElementById('enter-vr-btn').addEventListener('click', async () => {
   try {
     initAudio();
-    const session = await navigator.xr.requestSession('immersive-vr', {
-      optionalFeatures: ['local-floor', 'bounded-floor', 'hand-tracking'],
-    });
-    renderer.xr.setSession(session);
+    const s = await navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor','bounded-floor'] });
+    renderer.xr.setSession(s);
     document.getElementById('overlay').classList.add('hidden');
-    session.addEventListener('end', () => document.getElementById('overlay').classList.remove('hidden'));
-  } catch (err) {
-    alert('VR 시작 실패: ' + err.message);
-  }
-}
-async function checkVR() {
+    s.addEventListener('end', () => document.getElementById('overlay').classList.remove('hidden'));
+  } catch (e) { alert('VR 실패: ' + e.message); }
+});
+(async () => {
   if (navigator.xr) {
     const ok = await navigator.xr.isSessionSupported('immersive-vr').catch(() => false);
     if (ok) document.getElementById('enter-vr-btn').style.display = 'inline-block';
   }
-}
+})();
 
-// ── Init ───────────────────────────────────
 initScene();
 initControllers();
-initDesktopControls();
+initDesktop();
 renderer.setAnimationLoop(render);
 window.addEventListener('resize', () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setSize(innerWidth, innerHeight);
 });
-document.getElementById('start-btn').addEventListener('click', startDesktop);
-document.getElementById('enter-vr-btn').addEventListener('click', startVR);
-checkVR();
 </script>
 </body>
 </html>
